@@ -1,8 +1,8 @@
 ---
 layout: post
-date: 2016-01-15 07:59:00-0400
+date: 2025-3-11 
 inline: true
 related_posts: false
 ---
 
-A simple inline announcement with Markdown emoji! :sparkles: :smile:
+Awarded JWST cycle4 Time ([PID 7390](https://www.stsci.edu/jwst/science-execution/program-information?id=7390))

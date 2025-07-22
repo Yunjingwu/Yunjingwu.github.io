@@ -2,7 +2,7 @@
 layout: page
 permalink: /publications/
 title: Publications
-description: Yunjing Wu's Publication List 
+description: Yunjing Wu's first-author Publication List 
 nav: true
 nav_order: 3
 ---

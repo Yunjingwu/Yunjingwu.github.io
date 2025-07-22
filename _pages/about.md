@@ -1,6 +1,6 @@
 ---
 layout: about
-title: about
+title: About
 permalink: /
 subtitle: <a href='#'>Department of Astronomy, Tsinghua University</a>
 # . Address. Contacts. Motto. Etc.

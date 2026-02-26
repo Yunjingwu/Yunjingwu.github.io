@@ -764,13 +764,23 @@
 <body>
     <div class="container">
         <header>
-            <h1>PFS Next Field Selector</h1>
+            <h1>PFS Next Field Selector (for CO targets)</h1>
             <p class="subtitle">Field Selection Algorithm for Prime Focus Spectrograph</p>
             <p class="subtitle">Yunjing Wu (yunjing.wu@ipmu.jp, Kavli IPMU)</p>
             <div class="observatory-info">
                 <span> Subaru Telescope, Maunakea</span>
                 <span class="separator">|</span>
                 <span>19°49′14.4″N 155°28′05.0″W</span>
+            </div>
+            <div style="margin-top: 10px; padding: 10px 12px; border: 1px solid #dbeafe; background: #f8fbff; border-radius: 8px; text-align: left; max-width: 860px; margin-left: auto; margin-right: auto;">
+                <div style="font-size: 0.82rem; font-weight: 600; color: #075985; margin-bottom: 4px;">Quick Tutorial (Live Observations)</div>
+                <div style="font-size: 0.76rem; color: #334155; line-height: 1.5;">
+                    <div>1) Load <code>ppcList.ecsv</code>.</div>
+                    <div>2) Set HST time in <b>Observation Setup &amp; Status</b>.</div>
+                    <div>3) Enter current target (PPC code) and click <b>Set</b> to auto-fill RA/Dec.</div>
+                    <div>4) Read <b>Highest Score Target</b> as the next recommendation (current target is excluded).</div>
+                    <div>5) After finishing, click <b>Mark as Observed &amp; Get Next</b>.</div> 
+                </div>
             </div>
         </header>
         
@@ -944,23 +954,23 @@
                     <!-- Score Formula & Breakdown -->
                     <div class="score-breakdown" id="score-breakdown">
                         <div class="breakdown-title">Score Formula & Breakdown</div>
-                        <div class="breakdown-formula">S = P × e<sup>-T<sub>slew</sub>/20</sup> × e<sup>-(HA)²/2σ²</sup></div>
-                        <div class="formula-note">P = ppc_priority | T<sub>slew</sub> in seconds (0.5°/s) | σ = 7.5°-15° | El: 32°-75°</div>
+                        <div class="breakdown-formula">S = P × e<sup>-T<sub>slew</sub>/400</sup> × e<sup>-(H-H<sub>D</sub>)²/(2σ²)</sup></div>
+                        <div class="formula-note">σ = (d²X/dH²)<sup>-1/2</sup>/4 | H: midpoint HA of next observation | H<sub>D</sub>: HA at current observation time</div>
                         <div class="breakdown-grid">
                             <div class="breakdown-item">
                                 <span class="breakdown-label">Priority (P)</span>
                                 <span class="breakdown-value" id="break-priority">--</span>
                             </div>
                             <div class="breakdown-item">
-                                <span class="breakdown-label">Slew factor e<sup>-T/20</sup></span>
+                                <span class="breakdown-label">Slew factor e<sup>-T/400</sup></span>
                                 <span class="breakdown-value" id="break-slew">--</span>
                             </div>
                             <div class="breakdown-item">
-                                <span class="breakdown-label">HA factor e<sup>-(HA)²/2σ²</sup></span>
+                                <span class="breakdown-label">HA factor e<sup>-(H-H<sub>D</sub>)²/(2σ²)</sup></span>
                                 <span class="breakdown-value" id="break-ha">--</span>
                             </div>
                             <div class="breakdown-item">
-                                <span class="breakdown-label">σ (depends on Dec)</span>
+                                <span class="breakdown-label">σ from d²X/dH²</span>
                                 <span class="breakdown-value" id="break-sigma">--</span>
                             </div>
                             <div class="breakdown-item" style="background: #f5f5f5;">
@@ -1059,14 +1069,13 @@
         // ============================================
         let allData = [];
         let filteredData = [];
-        let currentPosition = { ra: null, dec: null }; // Last observed position
+        let currentPosition = { ra: null, dec: null, ppcCode: null }; // Last observed position
         let observationHistory = [];
         let sortColumn = 'score';
         let sortAscending = false;
         
-        const SLEW_SCALE = 20; // seconds, adjusted for Subaru's fast slewing (0.5°/s)
-        const HA_SIGMA_MIN = 7.5; // degrees
-        const HA_SIGMA_MAX = 15; // degrees
+        const SLEW_SCALE = 400; // seconds in DESI Eq. (7)
+        const SIGMA_FLOOR = 0.05; // numerical safety floor in degrees
         const MAX_AIRMASS = 2.5;
         const MOON_AVOIDANCE = 50; // degrees
         
@@ -1237,30 +1246,60 @@
         // ============================================
         // DESI-STYLE SCORE CALCULATION
         // ============================================
+
+        function normalizeHourAngleDeg(ha) {
+            let out = ha;
+            while (out > 180) out -= 360;
+            while (out < -180) out += 360;
+            return out;
+        }
+
+        function getDesignHourAngleFromCurrentTime(field, lstNow) {
+            const ra = parseFloat(field.ppc_ra);
+            if (!Number.isFinite(ra)) {
+                return { value: null, source: null };
+            }
+            return { value: getHourAngle(lstNow, ra), source: 'current_obs_time' };
+        }
+
+        function getAltitudeFromHourAngle(haDeg, decDeg, latitudeDeg) {
+            const haRad = degToRad(haDeg);
+            const decRad = degToRad(decDeg);
+            const latRad = degToRad(latitudeDeg);
+            const sinAlt = Math.sin(decRad) * Math.sin(latRad) +
+                          Math.cos(decRad) * Math.cos(latRad) * Math.cos(haRad);
+            return radToDeg(Math.asin(Math.max(-1, Math.min(1, sinAlt))));
+        }
+
+        function getAirmassFromHourAngle(haDeg, decDeg, latitudeDeg) {
+            const alt = getAltitudeFromHourAngle(haDeg, decDeg, latitudeDeg);
+            return getAirmass(alt);
+        }
+
+        function secondDerivativeAirmass(haDeg, decDeg, latitudeDeg) {
+            const dH = 0.25; // degrees
+            const x0 = getAirmassFromHourAngle(haDeg, decDeg, latitudeDeg);
+            const xp = getAirmassFromHourAngle(haDeg + dH, decDeg, latitudeDeg);
+            const xm = getAirmassFromHourAngle(haDeg - dH, decDeg, latitudeDeg);
+
+            if (!Number.isFinite(x0) || !Number.isFinite(xp) || !Number.isFinite(xm)) {
+                return NaN;
+            }
+
+            return (xp - 2 * x0 + xm) / (dH * dH);
+        }
         
-        function calculateScore(field, lst, latitude, moon, currentPos) {
+        function calculateScore(field, obsTime, latitude, longitude, moon, currentPos) {
             const ra = parseFloat(field.ppc_ra);
             const dec = parseFloat(field.ppc_dec);
             const priority = parseInt(field.ppc_priority) || 1;
+            const lstNow = getLST(obsTime, longitude);
             
             // Get airmass
-            const altAz = getAltAz(ra, dec, lst, latitude);
+            const altAz = getAltAz(ra, dec, lstNow, latitude);
             const airmass = getAirmass(altAz.alt);
             field._altitude = altAz.alt;
             field._airmass = airmass;
-            
-            // Hour angle
-            const ha = getHourAngle(lst, ra);
-            field._ha = ha;
-            
-            // Design hour angle (assume 0 for now, could be from file)
-            const haDesign = 0;
-            
-            // Sigma depends on declination (Eq. 8 from paper)
-            // Lower dec = smaller sigma (more sensitive to HA)
-            const dX_dH2 = 4 * Math.pow(Math.sin(degToRad(dec)), 2) + 12; // Simplified
-            let sigma = Math.sqrt(1 / dX_dH2) * 15; // Convert to degrees
-            sigma = Math.max(HA_SIGMA_MIN, Math.min(HA_SIGMA_MAX, sigma));
             
             // Slew time and overhead
             const slewInfo = estimateSlewTime(currentPos.ra, currentPos.dec, ra, dec);
@@ -1268,20 +1307,41 @@
             field._slewTotal = slewInfo.total;
             field._slewSeparation = slewInfo.separation || 0;
             field._slewBreakdown = slewInfo.breakdown;
+
+            // H = expected hour angle at midpoint of the next observation
+            const exptime = parseFloat(field.ppc_exptime);
+            const nframes = parseFloat(field.ppc_nframes);
+            const obsDurationSec = (Number.isFinite(exptime) && exptime > 0 ? exptime : 900) *
+                                   (Number.isFinite(nframes) && nframes > 0 ? nframes : 1);
+            const midpointMs = obsTime.getTime() + (slewInfo.total + 0.5 * obsDurationSec) * 1000;
+            const midpointTime = new Date(midpointMs);
+            const lstMid = getLST(midpointTime, longitude);
+            const H = getHourAngle(lstMid, ra);
+            const hdInfo = field.ppc_status !== 'observed'
+                ? getDesignHourAngleFromCurrentTime(field, lstNow)
+                : { value: null, source: null };
+            const hasDesignHA = Number.isFinite(hdInfo.value);
+            const HD = hasDesignHA ? hdInfo.value : H;
+            field._ha = H;
+            field._haDesign = HD;
+            field._haNow = getHourAngle(lstNow, ra);
             
             // Moon separation
             const moonSep = angularSeparation(ra, dec, moon.ra, moon.dec);
             field._moonSep = moonSep;
-            
-            // Base priority P - directly from ppc_priority
-            const P = priority;
-            
-            // Score calculation (Eq. 7)
-            // Use slew time only (not total overhead) for slew factor
-            // Readout and config are fixed costs that apply equally to all targets
+
+            // Sigma from Eq. (8): sigma = (d^2X/dH^2)^(-1/2) / 4
+            let d2XdH2 = secondDerivativeAirmass(HD, dec, latitude);
+            if (!Number.isFinite(d2XdH2) || d2XdH2 <= 0) {
+                d2XdH2 = secondDerivativeAirmass(H, dec, latitude);
+            }
+            let sigma = Number.isFinite(d2XdH2) && d2XdH2 > 0 ? (1 / Math.sqrt(d2XdH2)) / 4 : SIGMA_FLOOR;
+            sigma = Math.max(SIGMA_FLOOR, sigma);
+
             const slewFactor = Math.exp(-slewInfo.slew / SLEW_SCALE);
-            const haFactor = Math.exp(-Math.pow(ha - haDesign, 2) / (2 * sigma * sigma));
-            
+            const haDiff = normalizeHourAngleDeg(H - HD);
+            const haFactor = hasDesignHA ? Math.exp(-(haDiff * haDiff) / (2 * sigma * sigma)) : 1;
+            const P = priority;
             let score = P * slewFactor * haFactor;
             
             // Store breakdown for display
@@ -1291,6 +1351,12 @@
                 slewFactor: slewFactor,
                 haFactor: haFactor,
                 sigma: sigma,
+                H: H,
+                HD: HD,
+                haDiff: haDiff,
+                hasDesignHA: hasDesignHA,
+                hdSource: hdInfo.source,
+                d2XdH2: d2XdH2,
                 rawScore: score,
                 penalties: []
             };
@@ -1469,7 +1535,8 @@
                     currentPosition = {
                         ra: parseFloat(found.ppc_ra),
                         dec: parseFloat(found.ppc_dec),
-                        name: found.ppc_code
+                        name: found.ppc_code,
+                        ppcCode: found.ppc_code
                     };
                     updateCurrentTargetStatus();
                     recalculateAll();
@@ -1492,7 +1559,8 @@
             currentPosition = {
                 ra: ra,
                 dec: dec,
-                name: nameInput || `RA:${ra.toFixed(2)} Dec:${dec.toFixed(2)}`
+                name: nameInput || `RA:${ra.toFixed(2)} Dec:${dec.toFixed(2)}`,
+                ppcCode: null
             };
             
             updateCurrentTargetStatus();
@@ -1500,7 +1568,7 @@
         }
         
         function clearCurrentTarget() {
-            currentPosition = { ra: null, dec: null, name: null };
+            currentPosition = { ra: null, dec: null, name: null, ppcCode: null };
             document.getElementById('currentTargetName').value = '';
             document.getElementById('currentTargetRA').value = '';
             document.getElementById('currentTargetDec').value = '';
@@ -1542,7 +1610,7 @@
             
             // Calculate scores for all fields
             allData.forEach(field => {
-                calculateScore(field, lst, latitude, moon, currentPosition);
+                calculateScore(field, obsTime, latitude, longitude, moon, currentPosition);
             });
             
             applyFilters();
@@ -1567,6 +1635,17 @@
             updateTable();
             updateNextField();
             updateAirmassPlot();
+        }
+
+        function getDesiCandidates(data = filteredData) {
+            return data
+                .filter(f => {
+                    if (f.ppc_status === 'observed' || f._airmass > MAX_AIRMASS || f._score <= 0) return false;
+                    if (currentPosition.ppcCode && f.ppc_code === currentPosition.ppcCode) return false;
+                    return true;
+                })
+                .slice()
+                .sort((a, b) => (b._score || 0) - (a._score || 0));
         }
         
         function sortData() {
@@ -1623,10 +1702,7 @@
         }
         
         function updateNextField() {
-            // Get top scoring not-observed field
-            const candidates = filteredData.filter(f => 
-                f.ppc_status !== 'observed' && f._airmass <= MAX_AIRMASS && f._score > 0
-            );
+            const candidates = getDesiCandidates(filteredData);
             
             if (candidates.length === 0) {
                 document.getElementById('next-field-name').textContent = 'No visible targets';
@@ -1640,7 +1716,7 @@
                 return;
             }
             
-            const best = candidates[0]; // Already sorted by score
+            const best = candidates[0];
             
             document.getElementById('next-field-name').textContent = best.ppc_code;
             document.getElementById('next-ra').textContent = parseFloat(best.ppc_ra).toFixed(6) + '°';
@@ -1665,15 +1741,19 @@
                 return;
             }
             
-            const dec = parseFloat(field.ppc_dec);
             document.getElementById('break-priority').textContent = b.P + ` (from ppc_priority)`;
             const slewDetail = `sep:${field._slewSeparation.toFixed(1)}° → T=${field._slew.toFixed(0)}s`;
             document.getElementById('break-slew').textContent = b.slewFactor.toFixed(4) + 
                 ` (${slewDetail})`;
-            document.getElementById('break-ha').textContent = b.haFactor.toFixed(4) + 
-                ` (HA=${field._ha.toFixed(1)}°)`;
-            document.getElementById('break-sigma').textContent = b.sigma.toFixed(1) + '°' +
-                ` (from δ=${dec.toFixed(1)}°)`;
+            if (b.hasDesignHA) {
+                document.getElementById('break-ha').textContent = b.haFactor.toFixed(4) + 
+                    ` (H=${b.H.toFixed(2)}°, H_D=${b.HD.toFixed(2)}°, src:${b.hdSource})`;
+            } else {
+                document.getElementById('break-ha').textContent = `1.0000 (H_D unavailable, neutral HA term)`;
+            }
+            const d2Text = Number.isFinite(b.d2XdH2) ? b.d2XdH2.toExponential(2) : 'n/a';
+            document.getElementById('break-sigma').textContent = b.sigma.toFixed(3) + '°' +
+                ` (d²X/dH²=${d2Text})`;
             document.getElementById('break-calc').textContent = 
                 `${b.P} × ${b.slewFactor.toFixed(3)} × ${b.haFactor.toFixed(3)} = ${b.rawScore.toFixed(4)}`;
             document.getElementById('break-final').textContent = field._score.toFixed(4);
@@ -2027,16 +2107,12 @@
                     return;
                 }
             } else if (select === 'next') {
-                const candidates = filteredData.filter(f => 
-                    f.ppc_status !== 'observed' && f._airmass <= MAX_AIRMASS && f._score > 0
-                );
+                const candidates = getDesiCandidates(filteredData);
                 if (candidates.length > 0) {
                     fieldsToPlot = [candidates[0]];
                 }
             } else if (select === 'top5') {
-                const candidates = filteredData.filter(f => 
-                    f.ppc_status !== 'observed' && f._airmass <= MAX_AIRMASS && f._score > 0
-                );
+                const candidates = getDesiCandidates(filteredData);
                 fieldsToPlot = candidates.slice(0, 5);
             }
             
@@ -2191,9 +2267,7 @@
         }
         
         function markAsObserved() {
-            const candidates = filteredData.filter(f => 
-                f.ppc_status !== 'observed' && f._airmass <= MAX_AIRMASS && f._score > 0
-            );
+            const candidates = getDesiCandidates(filteredData);
             
             if (candidates.length === 0) return;
             
@@ -2206,7 +2280,8 @@
             currentPosition = {
                 ra: parseFloat(best.ppc_ra),
                 dec: parseFloat(best.ppc_dec),
-                name: best.ppc_code
+                name: best.ppc_code,
+                ppcCode: best.ppc_code
             };
             
             // Update the current target input fields
@@ -2251,7 +2326,7 @@
         
         function clearHistory() {
             observationHistory = [];
-            currentPosition = { ra: null, dec: null };
+            currentPosition = { ra: null, dec: null, ppcCode: null };
             updateHistory();
             recalculateAll();
         }
@@ -2269,7 +2344,7 @@
             const belowHorizon = allData.filter(d => d._altitude < 0);
             
             // Find best candidate
-            const best = notObserved.filter(f => f._airmass <= MAX_AIRMASS && f._score > 0)[0];
+            const best = getDesiCandidates(notObserved)[0];
             
             const traces = [];
             
@@ -2399,14 +2474,16 @@
             }
             
             let html = '';
-            filteredData.slice(0, 200).forEach((row, idx) => {
+            const topCandidate = getDesiCandidates(filteredData)[0];
+            const topCode = topCandidate ? topCandidate.ppc_code : null;
+            filteredData.slice(0, 200).forEach((row) => {
                 const statusClass = row.ppc_status === 'observed' ? 'status-observed' : 'status-not-observed';
                 const statusText = row.ppc_status === 'observed' ? 'Obs' : 'Pending';
                 
                 const amClass = row._airmass < 1.5 ? 'airmass-good' : row._airmass < 2 ? 'airmass-ok' : 'airmass-bad';
                 const scoreClass = row._score > 0.5 ? 'score-high' : row._score > 0.1 ? 'score-medium' : 'score-low';
                 
-                const isTop = idx === 0 && row.ppc_status !== 'observed' && row._score > 0;
+                const isTop = topCode !== null && row.ppc_code === topCode;
                 
                 html += `<tr data-ppc="${row.ppc_code}" class="${isTop ? 'top-candidate' : ''}" onclick="selectRow(this, '${row.ppc_code}')">
                     <td class="${scoreClass}">${row._score?.toFixed(3) || '--'}</td>
